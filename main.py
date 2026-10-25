@@ -14,7 +14,6 @@ from urllib3.util.retry import Retry
 import keyring
 
 SCHOOL_SUBDOMAIN = "sthelena-vic"
-YEARS = range(13, 20)
 APP_NAME = "GPAAverage"
 COOKIE_KEY = "auth_cookie"
 
@@ -91,11 +90,21 @@ def build_session(client: Compass) -> requests.Session:
         total=3,
         backoff_factor=1,
         status_forcelist=[429, 500, 502, 503, 504],
+        allowed_methods=["POST"],
+        raise_on_status=False,
     )
     adapter = HTTPAdapter(max_retries=retry, pool_connections=10, pool_maxsize=10)
     session.mount("https://", adapter)
     return session
 
+def fetch_group_ids(session, api_endpoint) -> list[int]:
+    r = session.get(
+        api_endpoint + "ReferenceDataCache.svc/GetAllAcademicGroups",
+        params={"sessionstate": "readonly", "page": 1, "start": 0, "limit": 999},
+        timeout=(15, 30),
+    )
+    r.raise_for_status()
+    return [item["id"] for item in r.json()["d"]]
 
 def fetch_learning_tasks(
     session: requests.Session,
@@ -123,9 +132,6 @@ def fetch_learning_tasks(
         )
     except requests.exceptions.Timeout:
         print(f"\nTimed out, skipping year.")
-        return None
-
-    if response is None:
         return None
 
     if not response.ok:
@@ -190,6 +196,7 @@ def main() -> None:
     print(f"Logged in as: {client.user.name} (ID: {user_id})")
 
     session = build_session(client)
+    GROUP_ID_RANGE = fetch_group_ids(session, client.API_ENDPOINT)
 
     results: dict[int, tuple[dict, list]] = {}
     with Spinner("Querying Database"):
@@ -198,7 +205,7 @@ def main() -> None:
                 executor.submit(
                     fetch_learning_tasks, session, client.API_ENDPOINT, user_id, year
                 ): year
-                for year in YEARS
+                for year in GROUP_ID_RANGE
             }
             for future in as_completed(futures):
                 result = future.result()
@@ -206,7 +213,7 @@ def main() -> None:
                     yr, subject_scores, all_scores = result
                     results[yr] = (subject_scores, all_scores)
 
-    for year in YEARS:
+    for year in GROUP_ID_RANGE:
         if year in results:
             subject_scores, all_scores = results[year]
             print_year_results(year, subject_scores, all_scores)
